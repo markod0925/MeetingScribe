@@ -6,13 +6,13 @@ public sealed class WhisperRunner
 {
     public async Task<string> RunAsync(string command, string expectedJsonPath, Action<int?> onProgress, CancellationToken ct)
     {
-        var split = command.Split(' ', 2);
+        var (fileName, arguments) = ParseCommand(command);
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = split[0].Trim('"'),
-                Arguments = split.Length > 1 ? split[1] : string.Empty,
+                FileName = fileName,
+                Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -56,5 +56,35 @@ public sealed class WhisperRunner
         }
 
         return await File.ReadAllTextAsync(expectedJsonPath, ct);
+    }
+
+    internal static (string FileName, string Arguments) ParseCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            throw new ArgumentException("Command cannot be null or whitespace.", nameof(command));
+        }
+
+        var trimmed = command.TrimStart();
+        if (trimmed[0] == '"')
+        {
+            var closingQuote = trimmed.IndexOf('"', 1);
+            if (closingQuote < 0)
+            {
+                throw new ArgumentException("Command executable path contains an unterminated quote.", nameof(command));
+            }
+
+            var executable = trimmed[1..closingQuote];
+            var args = trimmed[(closingQuote + 1)..].TrimStart();
+            return (executable, args);
+        }
+
+        var firstSpace = trimmed.IndexOf(' ');
+        if (firstSpace < 0)
+        {
+            return (trimmed, string.Empty);
+        }
+
+        return (trimmed[..firstSpace], trimmed[(firstSpace + 1)..].TrimStart());
     }
 }
