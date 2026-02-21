@@ -1,0 +1,3 @@
+Your previous output was invalid JSON.
+Return ONLY valid JSON matching the schema.
+No commentary.

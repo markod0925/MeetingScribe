@@ -1,0 +1,31 @@
+<Window x:Class="MeetingScribe.App.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:MeetingScribe.App.ViewModels"
+        mc:Ignorable="d"
+        Title="MeetingScribe" Height="420" Width="700">
+    <Window.DataContext>
+        <vm:MainViewModel />
+    </Window.DataContext>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="⚠ Loopback captures all system audio." FontWeight="SemiBold" Margin="0,0,0,12"/>
+        <StackPanel Orientation="Horizontal" Grid.Row="1" Margin="0,0,0,12">
+            <Button Content="Start" Command="{Binding StartCommand}" Width="100" Margin="0,0,8,0"/>
+            <Button Content="Stop" Command="{Binding StopCommand}" Width="100" Margin="0,0,8,0"/>
+            <Button Content="Cancel Processing" Command="{Binding CancelCommand}" Width="140" />
+        </StackPanel>
+        <StackPanel Grid.Row="2">
+            <TextBlock Text="{Binding CurrentState}" FontSize="16" FontWeight="Bold"/>
+            <ProgressBar Minimum="0" Maximum="100" Height="20" Value="{Binding Progress}" Margin="0,10,0,10"/>
+            <TextBox Text="{Binding StatusLog}" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Height="220"/>
+        </StackPanel>
+    </Grid>
+</Window>
