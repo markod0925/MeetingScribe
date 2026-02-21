@@ -1,516 +1,584 @@
-# MeetingScribe (Windows Portable) — Updated Technical Specification (VAD + Sync Enhancements)
-
-This revision integrates:
-
-- Native **whisper.cpp VAD support**
-- Startup **track offset correction**
-- Improved **LM Studio robustness**
-- Better **UX safety around Stop**
-- Deterministic **whisper CLI contract**
-
-This document supersedes previous versions.
+# MeetingScribe — Complete Technical Specification
+## Windows Portable Desktop Application
+## Ready for Codex Implementation
 
 ---
 
-# 0. Purpose
+# 1. Product Overview
 
-Build a **portable Windows desktop application** that:
+**MeetingScribe** is a portable Windows desktop application that:
 
-1. Captures a Webex meeting into **two separate tracks**:
+1. Records a Webex meeting using two synchronized audio streams:
    - Microphone (local user)
-   - System loopback (remote participants)
-2. Performs **offline transcription via whisper.cpp**
-3. Uses **LM Studio (local API)** for structured meeting minutes
-4. Exports an **Obsidian-ready Markdown note**
+   - System audio loopback (remote participants)
+2. Performs **offline transcription** using `whisper.cpp`
+3. Uses `whisper.cpp` native **VAD (Voice Activity Detection)**
+4. Generates structured meeting minutes using **LM Studio local API**
+5. Exports a Markdown note compatible with **Obsidian**
+6. Requires **no admin privileges**
+7. Works fully offline except for LM Studio local inference
 
-Constraints:
-
-- Windows only
-- Post-meeting processing
-- Portable (no admin, no installer)
-- Offline-first
-- Deterministic and testable pipeline
+This specification defines the complete architecture and behavior for deterministic implementation.
 
 ---
 
-# 1. High-Level User Flow (Revised UX)
+# 2. Technical Stack (MANDATORY)
 
-## Recording Flow
+The application MUST be implemented using:
 
-1. User clicks **Start Recording**
-2. App records mic + loopback
-3. User clicks **Stop Recording**
-4. App shows dialog:
+- **.NET 8**
+- **WPF**
+- **MVVM pattern**
+- **C# 12**
+- **NAudio** for audio capture
+- `System.Text.Json` for JSON handling
+- `HttpClient` for LM Studio
+- `Process` API for whisper.cpp CLI invocation
 
-   > Recording finished. What do you want to do?
-
-   Options:
-
-   - ✅ Start processing now (default)
-   - 🗑 Discard recording
-   - ❌ Cancel (return to recording)
-
-5. If confirmed → full automatic pipeline runs
-
-This prevents accidental long processing runs.
+Target:
+- Windows 10/11 x64
+- Self-contained publish
+- Portable folder distribution
 
 ---
 
-# 2. Repository Structure (Updated)
-
-Add VAD model and fixtures.
+# 3. Solution Structure
 
 ```
 
-tools/
-whisper/
-whisper-cli.exe
-whisper-cli.VERSION.txt
-fixtures/
-whisper_sample_output_v1.json
+MeetingScribe.sln
 
-models/
-ggml-small.bin
+src/
+MeetingScribe.App/
+WPF UI
+ViewModels/
+Views/
+Commands/
+Converters/
 
-```
-vad/
-  ggml-silero-v6.2.0.bin   # REQUIRED when VAD enabled
-```
+MeetingScribe.Core/
+Pipeline/
+Audio/
+Whisper/
+Transcript/
+Llm/
+Export/
+Settings/
+Logging/
+Models/
 
-templates/
-obsidian_note.md
-
-prompts/
-summary_system.txt
-summary_user.txt
-summary_repair_system.txt
+MeetingScribe.Tests/
 
 ````
 
+Separation rule:
+- App layer = UI only
+- Core layer = all business logic
+- Tests = test Core only
+
 ---
 
-# 3. Audio Capture and Synchronization
+# 4. Architecture
 
-## 3.1 Startup Offset Problem
+## 4.1 Pattern
 
-WASAPI mic and loopback start asynchronously.
+MVVM with:
 
-### Requirement (NEW)
+- MainViewModel
+- SettingsViewModel
+- RelayCommand
+- PipelineOrchestrator (Core)
 
-At recording start capture:
+No business logic inside code-behind.
+
+---
+
+## 4.2 Application State Machine
+
+States:
+
+- Idle
+- Recording
+- Processing
+  - TranscribingMic
+  - TranscribingLoopback
+  - Merging
+  - Summarizing
+  - Exporting
+- Cancelling
+- Done
+- Error
+
+State must be observable via INotifyPropertyChanged.
+
+---
+
+# 5. Application Lifecycle
+
+1. Startup
+   - Load settings
+   - Cleanup old temp runs
+   - Enumerate audio devices
+2. Recording
+   - Capture mic + loopback
+3. Stop
+   - Show confirmation dialog:
+     - Start processing
+     - Discard
+     - Cancel
+4. Processing pipeline runs automatically
+5. Completion
+   - Export Markdown
+   - Optionally open vault folder
+
+---
+
+# 6. Audio Subsystem
+
+## 6.1 Recording
+
+Use NAudio:
+
+- Mic: `WasapiCapture`
+- Loopback: `WasapiLoopbackCapture`
+
+Write raw WAV:
+- mic_raw.wav
+- loopback_raw.wav
+
+## 6.2 Resampling
+
+Convert raw WAV → 16 kHz mono PCM16 via `MediaFoundationResampler`.
+
+Output:
+- mic.wav
+- loopback.wav
+
+---
+
+# 7. Synchronization and Offset Correction
+
+## 7.1 Capture metadata
+
+At first buffer arrival:
 
 ```csharp
-record RecordingSyncMetadata(
-    DateTime RecordingStartUtc,
-    long MicFirstSampleStopwatchTicks,
-    long LoopbackFirstSampleStopwatchTicks,
-    double InitialOffsetMs
-);
+RecordingSyncMetadata {
+    DateTime RecordingStartUtc;
+    long MicFirstSampleTicks;
+    long LoopbackFirstSampleTicks;
+    double InitialOffsetMs;
+}
 ````
 
-Where:
-
-```
 InitialOffsetMs =
-    (LoopbackFirstSampleTicks - MicFirstSampleTicks)
-    / Stopwatch.Frequency * 1000
-```
-
-## 3.2 Offset Correction in Merge (MANDATORY)
-
-During transcript merge:
 
 ```
-if InitialOffsetMs > 0:
-    shift loopback timestamps backward
-else:
-    shift mic timestamps backward
+(LoopbackFirst - MicFirst) / Stopwatch.Frequency * 1000
 ```
 
-Clamp to ≥ 0.
+## 7.2 Merge offset correction
 
-⚠️ NOTE: This corrects **startup skew only**, not long-term drift (explicit v1 limitation).
+If InitialOffsetMs > 0:
+
+* shift loopback timestamps backward
+
+Else:
+
+* shift mic timestamps backward
+
+Clamp to >= 0.
+
+Note:
+This corrects startup skew only (no long-term drift correction in v1).
 
 ---
 
-# 4. Temporary Files Policy (Unchanged but Explicit)
+# 8. whisper.cpp Integration
 
-Temp root:
+## 8.1 Pinned Build
 
-```
-%TEMP%\MeetingScribe\<runId>\
-```
-
-Startup cleanup:
-
-* delete runs older than `tempRetentionDays` (default 7)
-* UI button: **Clean temp files**
-
----
-
-# 5. whisper.cpp Integration (Pinned + VAD Enabled)
-
-## 5.1 Pinned Build Requirement (CRITICAL)
-
-The distributed build MUST support:
-
-* `--output-json`
-* `--vad`
-* `--vad-model`
-* progress output to stdout
-
-Record in:
+Distributed:
 
 ```
+whisper/whisper-cli.exe
 whisper/whisper-cli.VERSION.txt
 ```
 
-Example:
+VERSION file must include:
 
-```
-whisper.cpp commit: <HASH>
-vad support: enabled
-json format: segments[].start/end (seconds)
-```
+* commit hash
+* build flags
+* VAD support confirmation
 
 ---
 
-## 5.2 Expected JSON Format (UNCHANGED)
+## 8.2 VAD Model
 
-Parser must expect:
+Required file:
 
-```json
-{
-  "segments": [
-    {
-      "start": 0.00,
-      "end": 4.32,
-      "text": " hello"
-    }
-  ]
-}
+```
+models/vad/ggml-silero-v*.bin
 ```
 
-Backward tolerance:
+If `useVad=true` and model missing:
 
-* support `t0` / `t1` in centiseconds
-
-Primary path remains pinned format.
-
----
-
-# 6. Native VAD Support (NEW MAJOR FEATURE)
-
-## 6.1 Design Decision
-
-**Use whisper.cpp built-in VAD**
-
-DO NOT implement external VAD in .NET.
-
-Rationale:
-
-* faster pipeline
-* less duplicated logic
-* better segmentation quality
-* lower CPU time on silence
+* show error
+* allow disable VAD and continue
 
 ---
 
-## 6.2 settings.json — Whisper Section (UPDATED)
+## 8.3 Command Construction
 
-```json
-"whisper": {
-  "language": "en",
-  "threads": 8,
-
-  "useVad": true,
-  "vadModelPath": "models/vad/ggml-silero-v6.2.0.bin",
-  "vadThreshold": 0.5,
-  "vadMinSpeechMs": 250,
-  "vadMinSilenceMs": 100,
-  "vadMaxSpeechSec": 30,
-  "vadSpeechPadMs": 100,
-  "vadSamplesOverlapSec": 0.10,
-
-  "extraArgs": ""
-}
-```
-
----
-
-## 6.3 Whisper Command Construction (REQUIRED)
-
-Base command:
+Base:
 
 ```
 whisper-cli.exe
   -m "<model>"
   -f "<wav>"
-  -l en
+  -l <language>
   --output-json
   --output-file "<outBase>"
 ```
 
-When `useVad = true`, append:
+If VAD enabled:
 
 ```
 --vad
---vad-model "<vadModelPath>"
---vad-thold <vadThreshold>
+--vad-model "<vadModel>"
+--vad-threshold <vadThreshold>
 --vad-min-speech-duration-ms <vadMinSpeechMs>
 --vad-min-silence-duration-ms <vadMinSilenceMs>
 --vad-max-speech-duration-s <vadMaxSpeechSec>
 --vad-speech-pad-ms <vadSpeechPadMs>
---vad-samples-overlap <vadSamplesOverlapSec>
+--vad-samples-overlap <vadSamplesOverlap>
 ```
 
-⚠️ IMPORTANT
-
-Exact flag names MUST match the pinned build.
-
-Codex must implement a **WhisperCommandBuilder** that:
-
-* builds arguments deterministically
-* only adds VAD flags when enabled
-* logs full command line for debugging
+Use a `WhisperCommandBuilder` class.
 
 ---
 
-## 6.4 VAD Model Validation (NEW)
+## 8.4 Progress Parsing
 
-Before transcription:
+Parse stdout for percentage pattern.
+If unavailable → indeterminate progress bar.
 
-* verify `vadModelPath` exists when `useVad=true`
-* if missing:
-
-  * show error
-  * offer “disable VAD and continue”
+Never block pipeline if parsing fails.
 
 ---
 
-# 7. Whisper Progress Reporting (NEW UX)
+# 9. Transcript Parsing
 
-whisper.cpp prints progress to stdout.
+Expected JSON:
 
-## Requirement
-
-Implement best-effort progress parsing.
-
-Pattern (example — adjust to pinned build):
-
-```
-progress = XX%
-```
-
-Behavior:
-
-* if parsing succeeds → update ProgressBar
-* else → show indeterminate progress
-
-Must never block pipeline.
-
----
-
-# 8. Transcript Merge Improvements
-
-## 8.1 Overlap Detection (NEW)
-
-During merge compute:
-
-```csharp
-bool IsOverlap
-```
-
-Definition:
-
-Segments overlap if time ranges intersect.
-
-Store in output JSON.
-
-## 8.2 Optional Debounce (Disabled by Default)
-
-Future-ready setting:
-
-```
-"merge": {
-  "dropShortOverlaps": false,
-  "overlapDropThresholdSec": 0.6
+```json
+{
+  "segments": [
+    { "start": 0.00, "end": 3.20, "text": " hello" }
+  ]
 }
 ```
 
-v1 behavior:
+Parser must:
 
-* DO NOT drop segments
-* only mark overlaps
+* Support `start/end`
+* Support fallback `t0/t1` (centiseconds)
+* Trim whitespace
+* Normalize spacing
 
 ---
 
-# 9. LM Studio Robustness (Enhanced)
+# 10. Transcript Merge Engine
 
-## 9.1 Startup Retry (REQUIRED)
+Algorithm:
 
-Distinguish:
+1. Label:
+
+   * mic → "You"
+   * loopback → "Others"
+2. Apply offset correction
+3. Combine lists
+4. Sort by StartSec
+5. Detect overlap:
+
+   * mark IsOverlap=true
+
+Do NOT drop segments in v1.
+
+---
+
+# 11. LM Studio Integration
+
+## 11.1 Endpoint
+
+POST `{baseUrl}/chat/completions`
+
+---
+
+## 11.2 Retry Strategy
+
+For attempt in 1..startupRetryCount:
+
+* try request
+* if fail → wait startupRetryDelaySec
+
+Differentiate:
 
 * connection failure
-* HTTP 503/500
+* 503 / model loading
 * timeout
 
-Retry policy:
-
-```
-for attempt in 1..startupRetryCount:
-    try request
-    if success → break
-    else wait startupRetryDelaySec
-```
-
 ---
 
-## 9.2 Raw Output Preservation (NEW — MUST)
+## 11.3 Always Save Raw Output
 
-Always save:
+Always write:
 
 ```
-<llm_run_dir>/llm_raw_output.txt
+llm_raw_output.txt
 ```
 
-Even on success.
-
-If JSON validation fails after retries:
+If JSON invalid after repair:
 
 * export transcript-only note
-* include raw output in appendix
-* log warning
+* include raw output appendix
 
 ---
 
-## 9.3 JSON Validation (REQUIRED)
+# 12. Prompt Templates (Exact)
 
-After LLM response:
-
-1. Parse JSON
-2. Validate required fields
-3. If invalid → repair prompt
-4. If still invalid → fallback mode
-
-Unit tests required.
-
----
-
-# 10. Chunking Rules (UNCHANGED BUT RECONFIRMED)
-
-Threshold:
+## summary_system.txt
 
 ```
-maxInputCharsPerChunk = 12000
-overlap = 500
+You are a meeting summarization assistant.
+Return ONLY valid JSON.
+Do not hallucinate information.
+Use null if unknown.
+
+Schema:
+{
+  "Title": string,
+  "DateIso": string,
+  "SummaryBullets": string[],
+  "Decisions": string[],
+  "Actions": [
+    {
+      "Text": string,
+      "Owner": string|null,
+      "DueDateIso": string|null,
+      "Priority": "Low"|"Medium"|"High",
+      "Evidence": string
+    }
+  ],
+  "OpenQuestions": string[],
+  "Risks": string[]
+}
 ```
 
-Hierarchical merge rules remain deterministic.
+## summary_user.txt
+
+```
+Meeting Title: {{TITLE}}
+Date: {{DATE_ISO}}
+
+Transcript:
+{{TRANSCRIPT}}
+
+Return JSON only.
+```
+
+## summary_repair_system.txt
+
+```
+Your previous output was invalid JSON.
+Return ONLY valid JSON matching the schema.
+No commentary.
+```
 
 ---
 
-# 11. Cancellation Support (REQUIRED)
+# 13. Chunking Algorithm
 
-All long operations accept `CancellationToken`.
+If transcript length > maxCharsPerChunk:
+
+* Split into chunks
+* Overlap chunkOverlapChars
+* Summarize each chunk
+* Merge results:
+
+Merge rules:
+
+* Concat and dedup bullets
+* Dedup actions by normalized Text
+* Choose highest priority
+* Merge evidence ranges
+
+---
+
+# 14. Markdown Export
+
+Template placeholders:
+
+* {{TITLE}}
+* {{DATE_ISO}}
+* {{SUMMARY_BULLETS}}
+* {{DECISIONS}}
+* {{ACTIONS}}
+* {{TRANSCRIPT}}
+
+Use `Path.Combine` for file creation.
+
+Filename:
+
+```
+YYYY-MM-DD - Title.md
+```
+
+Sanitize invalid characters.
+
+---
+
+# 15. Settings Handling
+
+Primary:
+
+```
+<AppDir>/config/settings.json
+```
+
+Fallback:
+
+```
+%APPDATA%/MeetingScribe/settings.json
+```
+
+Include `"schemaVersion"`.
+
+Migration required if version mismatch.
+
+---
+
+# 16. Temporary Files
+
+Run folder:
+
+```
+%TEMP%/MeetingScribe/<timestamp>/
+```
+
+Startup:
+
+* delete folders older than tempRetentionDays
+
+UI:
+
+* Clean temp files button
+
+---
+
+# 17. Logging
+
+Run logs:
+
+```
+run.log
+```
+
+Persistent logs:
+
+* AppDir/logs if writable
+* else %APPDATA%/MeetingScribe/logs
+
+---
+
+# 18. Cancellation
+
+All async operations accept CancellationToken.
 
 Cancel behavior:
 
-### During recording
-
-* stop capture
-* finalize WAV
-
-### During whisper
-
-* kill process tree
-
-### During LM Studio
-
-* cancel HTTP request
-
-State machine includes:
-
-* Idle
-* Recording
-* Processing
-* Cancelling
-* Done
-* Error
+* Stop recording
+* Kill whisper process tree
+* Cancel HTTP request
+* Keep run folder unless configured otherwise
 
 ---
 
-# 12. User Experience Improvements
+# 19. UX Requirements
 
-## 12.1 Loopback Warning (NEW)
-
-In Settings UI show:
-
-> Loopback capture records ALL system audio from the selected playback device.
-
----
-
-## 12.2 Stop Confirmation (NEW — REQUIRED)
-
-After Stop show confirmation dialog (see Section 1).
+* Warn: loopback captures ALL system audio
+* Stop confirmation dialog required
+* Progress stage display required
+* Cancel button during processing required
 
 ---
 
-## 12.3 Progress UI
+# 20. Build & Distribution
 
-Pipeline stage labels:
+* dotnet publish
+* Runtime: win-x64
+* SelfContained: true
+* Portable folder zip
+* Include whisper folder + models
 
-* Transcribing (Mic)
-* Transcribing (Loopback)
-* Merging transcript
-* Generating summary
-* Exporting note
-
-Each stage visible in UI.
+No installer.
 
 ---
 
-# 13. Build and Distribution (Unchanged)
+# 21. Testing Strategy
 
-* Windows x64
-* self-contained
-* portable folder zip
-* no installer
+Must include:
 
----
-
-# 14. Updated Acceptance Criteria
-
-The application is accepted when:
-
-1. Portable run without admin.
-2. Startup offset between tracks is measured and corrected.
-3. whisper.cpp runs with native VAD when enabled.
-4. Missing VAD model is detected gracefully.
-5. Progress bar updates when whisper prints progress.
-6. LM Studio failures never lose data (raw output saved).
-7. Cancel works during any processing stage.
-8. Stop confirmation prevents accidental long processing.
-9. Temp folders auto-clean after retention period.
-10. Overlapping speech segments are detected and flagged.
+* Whisper JSON parser test
+* Merge offset correction test
+* Chunk splitting test
+* Chunk merge logic test
+* Markdown generation test
+* Settings migration test
+* Temp cleanup test
 
 ---
 
-# 15. Explicit v1 Limitations
+# 22. Acceptance Criteria
 
-Document clearly:
+Application is complete when:
 
-* No long-term drift correction (only startup offset)
+1. Runs without admin
+2. Records two tracks
+3. Applies offset correction
+4. whisper.cpp runs with VAD
+5. LM Studio produces structured JSON
+6. Raw LLM output preserved
+7. Cancel works at any stage
+8. Markdown exported correctly
+9. Temp cleanup works
+10. UI never blocks or freezes
+
+---
+
+# 23. Known Limitations
+
+* No drift correction
 * No multi-speaker diarization
-* Loopback captures all system audio
-* VAD quality depends on whisper.cpp model
+* Loopback captures all audio
+* VAD behavior depends on whisper model
 
 ---
 
-# 16. Future Enhancements (v1.5+)
+END OF SPECIFICATION
 
-* true drift correction
-* better overlap heuristics
-* optional stereo capture path
-* GPU structured configuration
-* advanced diarization
+```
+
+This version is now:
+
+- Fully stack-defined (.NET 8, WPF, MVVM)
+- Architecturally complete
+- Pipeline deterministic
+- VAD-integrated
+- Offset-aware
+- LM robust
+- UX-safe
+- Portable-defined
+- Testable
+
+Ready for Codex implementation.
