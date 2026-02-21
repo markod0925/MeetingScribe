@@ -4,6 +4,7 @@ public sealed class AppSettings
 {
     public int SchemaVersion { get; set; } = 1;
     public string Language { get; set; } = "it";
+    public string WhisperExecutablePath { get; set; } = "whisper/whisper-cli.exe";
     public string WhisperModelPath { get; set; } = "models/ggml-base.bin";
     public bool UseVad { get; set; } = true;
     public string VadModelPath { get; set; } = "models/vad/ggml-silero-v5.1.2.bin";

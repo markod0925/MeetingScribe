@@ -3,6 +3,7 @@ using MeetingScribe.Core.Llm;
 using MeetingScribe.Core.Models;
 using MeetingScribe.Core.Settings;
 using MeetingScribe.Core.Temp;
+using MeetingScribe.Core.Templates;
 using MeetingScribe.Core.Transcript;
 
 namespace MeetingScribe.Tests;
@@ -75,12 +76,11 @@ public class CoreTests
     }
 
     [Fact]
-    public AppSettings SettingsMigration_UpdatesSchemaVersion()
+    public void SettingsMigration_UpdatesSchemaVersion()
     {
         var service = new SettingsService();
         var migrated = service.Migrate(new AppSettings { SchemaVersion = 0 });
         Assert.Equal(1, migrated.SchemaVersion);
-        return migrated;
     }
 
     [Fact]
@@ -96,5 +96,16 @@ public class CoreTests
         svc.CleanupOldRuns(2);
 
         Assert.False(Directory.Exists(old));
+    }
+
+    [Fact]
+    public void PromptTemplateProvider_FallsBackWhenFilesMissing()
+    {
+        var provider = new PromptTemplateProvider(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
+        var system = provider.GetSummarySystem();
+        var user = provider.GetSummaryUser("Titolo", "2026-01-01", "ciao");
+
+        Assert.Contains("valid JSON", system);
+        Assert.Contains("Titolo", user);
     }
 }
