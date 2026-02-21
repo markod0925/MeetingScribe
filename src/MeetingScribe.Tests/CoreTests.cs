@@ -5,6 +5,7 @@ using MeetingScribe.Core.Settings;
 using MeetingScribe.Core.Temp;
 using MeetingScribe.Core.Templates;
 using MeetingScribe.Core.Transcript;
+using MeetingScribe.Core.Whisper;
 
 namespace MeetingScribe.Tests;
 
@@ -107,5 +108,26 @@ public class CoreTests
 
         Assert.Contains("valid JSON", system);
         Assert.Contains("Titolo", user);
+    }
+
+    [Fact]
+    public void WhisperRunner_ParseCommand_SupportsQuotedExecutablePath()
+    {
+        var command = "\"C:\\Program Files\\whisper\\whisper-cli.exe\" -m model.bin -f input.wav";
+
+        var parsed = WhisperRunner.ParseCommand(command);
+
+        Assert.Equal("C:\\Program Files\\whisper\\whisper-cli.exe", parsed.FileName);
+        Assert.Equal("-m model.bin -f input.wav", parsed.Arguments);
+    }
+
+    [Fact]
+    public void WhisperRunner_ParseCommand_ThrowsOnUnterminatedQuote()
+    {
+        var command = "\"C:\\Program Files\\whisper\\whisper-cli.exe -m model.bin";
+
+        var ex = Assert.Throws<ArgumentException>(() => WhisperRunner.ParseCommand(command));
+
+        Assert.Contains("unterminated quote", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 }
